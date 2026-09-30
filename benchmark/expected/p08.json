@@ -1,0 +1,51 @@
+{
+ "columns": [
+  "seller_id",
+  "n_orders"
+ ],
+ "rows": [
+  [
+   "6560211a19b47992c3666cc44a7e94c0",
+   1854
+  ],
+  [
+   "4a3ca9315b744ce9f8e9374361493884",
+   1806
+  ],
+  [
+   "cc419e0650a3c5ba77189a1882b7556a",
+   1706
+  ],
+  [
+   "1f50f920176fa81dab994f9023523100",
+   1404
+  ],
+  [
+   "da8622b14eb17ae2831f4ac5b9dab84a",
+   1314
+  ],
+  [
+   "955fee9216a65b617aa5c0531780ce60",
+   1287
+  ],
+  [
+   "7a67c85e85bb2ce8582c35f2203ad736",
+   1160
+  ],
+  [
+   "ea8482cd71df3c1969d7b9473ff13abc",
+   1146
+  ],
+  [
+   "4869f7a5dfa277a7dca6462dcf3b52b2",
+   1132
+  ],
+  [
+   "3d871de0142ce09b7081e2b9d1733cb1",
+   1080
+  ]
+ ],
+ "alternatives": [],
+ "db_fingerprint": "f2b0526aa07e",
+ "benchmark_version": "pilot-1"
+}

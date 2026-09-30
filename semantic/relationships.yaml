@@ -1,0 +1,33 @@
+# E2 — relational context beyond what the FK catalog shows: cardinality and soft joins.
+# Hard foreign keys themselves are read from PostgreSQL at runtime.
+version: 1
+relationships:
+  - from: orders.customer_id
+    to: customers.customer_id
+    cardinality: one-to-one
+  - from: order_items.order_id
+    to: orders.order_id
+    cardinality: many-to-one
+  - from: order_items.product_id
+    to: products.product_id
+    cardinality: many-to-one
+  - from: order_items.seller_id
+    to: sellers.seller_id
+    cardinality: many-to-one
+  - from: order_payments.order_id
+    to: orders.order_id
+    cardinality: many-to-one
+  - from: order_reviews.order_id
+    to: orders.order_id
+    cardinality: many-to-one
+  - from: products.product_category_name
+    to: product_category_translation.product_category_name
+    cardinality: many-to-one
+  - from: customers.customer_zip_code_prefix
+    to: geolocation.geolocation_zip_code_prefix
+    cardinality: many-to-one
+    note: No foreign key; a few prefixes have no geolocation row (use LEFT JOIN).
+  - from: sellers.seller_zip_code_prefix
+    to: geolocation.geolocation_zip_code_prefix
+    cardinality: many-to-one
+    note: No foreign key; a few prefixes have no geolocation row (use LEFT JOIN).

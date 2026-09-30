@@ -1,0 +1,78 @@
+# E4 — business entity semantics: what the business means by each noun,
+# especially where database identity != business identity.
+# `content` is what gets embedded and shown to the model.
+version: 1
+knowledge_type: business_entity
+items:
+  - id: ent.customer
+    name: Customer
+    content: >
+      A customer is a unique person who buys on the marketplace. Identify customers with
+      customers.customer_unique_id. customers.customer_id is NOT a person: a new customer_id is
+      created for every order, so one person with three orders has three customer_id values
+      and one customer_unique_id. Count customers with COUNT(DISTINCT customers.customer_unique_id).
+    metadata:
+      tables: [customers, orders]
+      columns: [customers.customer_unique_id, customers.customer_id]
+
+  - id: ent.order
+    name: Order
+    content: >
+      An order is one purchase, identified by orders.order_id (one row in orders). An order can
+      contain several items (order_items rows), possibly from different sellers, and can be paid
+      with several payments (order_payments rows). Count orders with COUNT(DISTINCT order_id)
+      whenever order_items or order_payments are joined in.
+    metadata:
+      tables: [orders, order_items, order_payments]
+      columns: [orders.order_id]
+
+  - id: ent.order_item
+    name: Order item (line item / units sold)
+    content: >
+      An order item is one line of an order: one unit of one product sold by one seller
+      (order_items row, identified by order_id + order_item_id). "Items sold" or "units sold"
+      means counting order_items rows.
+    metadata:
+      tables: [order_items]
+      columns: [order_items.order_id, order_items.order_item_id]
+
+  - id: ent.seller
+    name: Seller
+    content: >
+      A seller is a merchant identified by sellers.seller_id. Sellers are linked to orders only
+      through order_items.seller_id; orders has no seller column. A seller's orders are the
+      distinct order_id values in order_items for that seller.
+    metadata:
+      tables: [sellers, order_items]
+      columns: [sellers.seller_id, order_items.seller_id]
+
+  - id: ent.product
+    name: Product and product category
+    content: >
+      A product is identified by products.product_id. A product category is
+      products.product_category_name (Portuguese). When a question asks about categories,
+      report the English name from product_category_translation.product_category_name_english.
+    metadata:
+      tables: [products, product_category_translation]
+      columns: [products.product_id, products.product_category_name,
+                product_category_translation.product_category_name_english]
+
+  - id: ent.review
+    name: Review
+    content: >
+      A review is a customer's 1-5 satisfaction score for an order (order_reviews). Reviews belong
+      to orders, not to products or sellers; a review of an order with several items applies to
+      the whole order.
+    metadata:
+      tables: [order_reviews, orders]
+      columns: [order_reviews.review_score, order_reviews.order_id]
+
+  - id: ent.customer_location
+    name: Customer location
+    content: >
+      A customer's location (city, state) is the delivery address on customers.customer_city and
+      customers.customer_state, reached from an order via orders.customer_id. A seller's location
+      is sellers.seller_city and sellers.seller_state.
+    metadata:
+      tables: [customers, sellers, orders]
+      columns: [customers.customer_state, sellers.seller_state]

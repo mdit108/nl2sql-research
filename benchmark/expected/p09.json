@@ -1,0 +1,13 @@
+{
+ "columns": [
+  "sum"
+ ],
+ "rows": [
+  [
+   6108492.27
+  ]
+ ],
+ "alternatives": [],
+ "db_fingerprint": "f2b0526aa07e",
+ "benchmark_version": "pilot-1"
+}

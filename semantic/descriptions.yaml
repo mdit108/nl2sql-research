@@ -1,0 +1,87 @@
+# E3 — descriptive metadata: what a typical data dictionary says.
+# Literal descriptions of what each table/column contains. Business rules
+# ("how to count customers", "what revenue means") deliberately live in
+# entities.yaml / metrics.yaml / domain_rules.yaml, not here.
+version: 1
+tables:
+  customers:
+    description: Customer record attached to each order, with the delivery location.
+    columns:
+      customer_id: Key to the orders table. Each order has its own customer_id.
+      customer_unique_id: Anonymised identifier of the customer.
+      customer_zip_code_prefix: First five digits of the customer's delivery zip code.
+      customer_city: Customer city name (lowercase, no accents).
+      customer_state: Two-letter Brazilian state code, e.g. SP, RJ, MG.
+  orders:
+    description: One row per order placed on the marketplace, with its status and lifecycle timestamps.
+    columns:
+      order_id: Unique identifier of the order.
+      customer_id: Customer record for this order.
+      order_status: "Current status: created, approved, invoiced, processing, shipped, delivered, canceled, unavailable."
+      order_purchase_timestamp: When the customer placed the order.
+      order_approved_at: When payment was approved.
+      order_delivered_carrier_date: When the order was handed to the logistics carrier.
+      order_delivered_customer_date: When the order was delivered to the customer. Null if not delivered.
+      order_estimated_delivery_date: Delivery date promised to the customer at purchase time.
+  order_items:
+    description: Line items of each order. An order with three products has three rows.
+    columns:
+      order_id: Order this item belongs to.
+      order_item_id: Sequential line number within the order (1, 2, 3, ...).
+      product_id: Product sold on this line.
+      seller_id: Seller who sold this line.
+      shipping_limit_date: Deadline for the seller to hand the item to the carrier.
+      price: Item price in BRL, excluding freight.
+      freight_value: Freight charged for this item in BRL. An order's freight is split across its items.
+  order_payments:
+    description: Payments made for each order. An order can be paid with several payment methods.
+    columns:
+      order_id: Order being paid.
+      payment_sequential: Sequence number of the payment within the order.
+      payment_type: "Payment method: credit_card, boleto, voucher, debit_card, not_defined."
+      payment_installments: Number of installments chosen by the customer.
+      payment_value: Amount of this payment in BRL.
+  order_reviews:
+    description: Satisfaction reviews written by customers after receiving (or expecting) an order.
+    columns:
+      review_id: Identifier of the review.
+      order_id: Order being reviewed.
+      review_score: Score from 1 (worst) to 5 (best).
+      review_comment_title: Title of the review comment, in Portuguese. Often empty.
+      review_comment_message: Review comment text, in Portuguese. Often empty.
+      review_creation_date: Date the satisfaction survey was sent to the customer.
+      review_answer_timestamp: When the customer answered the survey.
+  products:
+    description: Product catalogue with category and physical attributes.
+    columns:
+      product_id: Unique identifier of the product.
+      product_category_name: Category name, in Portuguese.
+      product_name_length: Number of characters in the product name.
+      product_description_length: Number of characters in the product description.
+      product_photos_qty: Number of published product photos.
+      product_weight_g: Weight in grams.
+      product_length_cm: Length in centimetres.
+      product_height_cm: Height in centimetres.
+      product_width_cm: Width in centimetres.
+  sellers:
+    description: Sellers (merchants) that sell through the marketplace.
+    columns:
+      seller_id: Unique identifier of the seller.
+      seller_zip_code_prefix: First five digits of the seller's zip code.
+      seller_city: Seller city name.
+      seller_state: Two-letter Brazilian state code of the seller.
+  product_category_translation:
+    description: Translation of Portuguese product category names to English.
+    columns:
+      product_category_name: Category name in Portuguese.
+      product_category_name_english: Category name in English.
+      is_inferred: True for the two categories that were missing from the source translation file.
+  geolocation:
+    description: Approximate coordinates for each Brazilian zip code prefix.
+    columns:
+      geolocation_zip_code_prefix: First five digits of a zip code.
+      geolocation_lat: Median latitude of addresses with this prefix.
+      geolocation_lng: Median longitude of addresses with this prefix.
+      geolocation_city: Most common city name for this prefix.
+      geolocation_state: Most common state for this prefix.
+      source_row_count: Number of raw geolocation rows aggregated into this row.

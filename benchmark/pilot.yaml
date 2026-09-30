@@ -1,0 +1,393 @@
+# 20-question pilot benchmark.
+#
+# Fields per question
+#   id, question, category, tags, difficulty
+#   expected_sql        trusted SQL; its result (expected/<id>.json) is the ground truth
+#   required_tables     tables a correct answer must touch
+#   required_knowledge  semantic knowledge item ids (semantic/*.yaml) a correct answer depends on;
+#                       used for gold context and for retrieval precision/recall
+#   comparison          how results are compared (see evaluation/compare_results.py)
+#   alternatives        other *reasonable* interpretations (ambiguous questions only) -> "plausible" score
+#   semantic_checks     regex checks on the generated SQL, used to label failures
+#                       (expect: present | absent). They never decide correctness.
+#   notes
+#
+# Categories: schema | relational | metric | trap | ambiguous
+# Tags: STRUCTURAL RELATIONAL DESCRIPTIVE BUSINESS_IDENTITY METRIC_SEMANTICS DOMAIN_SEMANTICS
+#       AMBIGUITY TEMPORAL MULTI_HOP SEMANTIC_TRAP
+version: pilot-1
+questions:
+
+  # ---------------------------------------------------------------- schema
+  - id: p01
+    question: How many orders are in the dataset?
+    category: schema
+    tags: [STRUCTURAL]
+    difficulty: easy
+    expected_sql: SELECT COUNT(*) FROM olist.orders
+    required_tables: [orders]
+    required_knowledge: []
+    notes: Control question. Should be solvable from table names alone (E1).
+
+  - id: p02
+    question: How many sellers are there in each state?
+    category: schema
+    tags: [STRUCTURAL]
+    difficulty: easy
+    expected_sql: SELECT seller_state, COUNT(*) FROM olist.sellers GROUP BY seller_state
+    required_tables: [sellers]
+    required_knowledge: []
+    notes: Control. Unordered row set.
+
+  - id: p03
+    question: How many orders were canceled?
+    category: schema
+    tags: [STRUCTURAL, DESCRIPTIVE]
+    difficulty: easy
+    expected_sql: SELECT COUNT(*) FROM olist.orders WHERE order_status = 'canceled'
+    required_tables: [orders]
+    required_knowledge: []
+    notes: >
+      Needs the exact status value ('canceled', not 'cancelled'), which only descriptions (E3) list.
+      Also an anti-trap: the "exclude canceled orders" rule (E6) must NOT be applied here.
+
+  - id: p04
+    question: What is the average number of installments for credit card payments?
+    category: schema
+    tags: [STRUCTURAL, DESCRIPTIVE]
+    difficulty: easy
+    expected_sql: >
+      SELECT AVG(payment_installments) FROM olist.order_payments WHERE payment_type = 'credit_card'
+    required_tables: [order_payments]
+    required_knowledge: []
+    comparison: {abs_tol: 0.01}
+    notes: Needs the enum value 'credit_card'.
+
+  # ------------------------------------------------------------ relational
+  - id: p05
+    question: How many order items belong to sellers located in the state SP?
+    category: relational
+    tags: [RELATIONAL]
+    difficulty: easy
+    expected_sql: >
+      SELECT COUNT(*) FROM olist.order_items i JOIN olist.sellers s ON s.seller_id = i.seller_id
+      WHERE s.seller_state = 'SP'
+    required_tables: [order_items, sellers]
+    required_knowledge: []
+    notes: One join. No status filter (the question is about line items, not sales).
+
+  - id: p06
+    question: For each customer state, what is the average freight value per order item?
+    category: relational
+    tags: [RELATIONAL, MULTI_HOP]
+    difficulty: medium
+    expected_sql: >
+      SELECT c.customer_state, AVG(i.freight_value)
+      FROM olist.order_items i
+      JOIN olist.orders o ON o.order_id = i.order_id
+      JOIN olist.customers c ON c.customer_id = o.customer_id
+      GROUP BY c.customer_state
+    required_tables: [order_items, orders, customers]
+    required_knowledge: []
+    comparison: {abs_tol: 0.01}
+    notes: Two-hop join path (items -> orders -> customers). No semantics needed.
+
+  - id: p07
+    question: What is the average review score given by customers located in the state RJ?
+    category: relational
+    tags: [RELATIONAL, MULTI_HOP]
+    difficulty: medium
+    expected_sql: >
+      SELECT AVG(r.review_score)
+      FROM olist.order_reviews r
+      JOIN olist.orders o ON o.order_id = r.order_id
+      JOIN olist.customers c ON c.customer_id = o.customer_id
+      WHERE c.customer_state = 'RJ'
+    required_tables: [order_reviews, orders, customers]
+    required_knowledge: []
+    comparison: {abs_tol: 0.001}
+    notes: Reviews reach customers only through orders.
+
+  - id: p08
+    question: Which 10 sellers have received the most distinct orders?
+    category: relational
+    tags: [RELATIONAL]
+    difficulty: medium
+    expected_sql: >
+      SELECT seller_id, COUNT(DISTINCT order_id) AS n_orders
+      FROM olist.order_items GROUP BY seller_id ORDER BY n_orders DESC LIMIT 10
+    required_tables: [order_items]
+    required_knowledge: []
+    comparison: {order_matters: true, match_columns: [0]}
+    notes: >
+      Sellers link to orders only via order_items. COUNT(*) instead of COUNT(DISTINCT order_id)
+      changes the ranking. No ties at the top-10 boundary (checked: 1080 vs 982).
+
+  # ---------------------------------------------------------------- metric
+  - id: p09
+    question: What was the total revenue in 2017?
+    category: metric
+    tags: [METRIC_SEMANTICS, DOMAIN_SEMANTICS, TEMPORAL, SEMANTIC_TRAP]
+    difficulty: medium
+    expected_sql: >
+      SELECT SUM(i.price)
+      FROM olist.order_items i JOIN olist.orders o ON o.order_id = i.order_id
+      WHERE o.order_status NOT IN ('canceled', 'unavailable')
+        AND o.order_purchase_timestamp >= '2017-01-01' AND o.order_purchase_timestamp < '2018-01-01'
+    required_tables: [order_items, orders]
+    required_knowledge: [met.revenue, rule.eligible_orders, rule.payment_value_vs_revenue, rule.time_attribution]
+    comparison: {rel_tol: 0.0001}
+    semantic_checks:
+      - {knowledge: met.revenue, pattern: 'payment_value', expect: absent}
+      - {knowledge: met.revenue, pattern: 'freight_value', expect: absent}
+      - {knowledge: rule.eligible_orders, pattern: 'canceled', expect: present}
+    notes: "Three ways to be wrong: payments instead of price, adding freight, including canceled orders."
+
+  - id: p10
+    question: What is the average order value?
+    category: metric
+    tags: [METRIC_SEMANTICS]
+    difficulty: medium
+    expected_sql: >
+      SELECT AVG(order_total) FROM (
+        SELECT i.order_id, SUM(i.price) AS order_total
+        FROM olist.order_items i JOIN olist.orders o ON o.order_id = i.order_id
+        WHERE o.order_status NOT IN ('canceled', 'unavailable')
+        GROUP BY i.order_id) t
+    required_tables: [order_items, orders]
+    required_knowledge: [met.average_order_value, met.revenue, rule.eligible_orders]
+    comparison: {abs_tol: 0.01}
+    semantic_checks:
+      - {knowledge: met.average_order_value, pattern: 'payment_value', expect: absent}
+    notes: Classic two-level aggregation; AVG(price) over items is the common wrong answer.
+
+  - id: p11
+    question: What is the repeat customer rate?
+    category: metric
+    tags: [METRIC_SEMANTICS, BUSINESS_IDENTITY, SEMANTIC_TRAP]
+    difficulty: hard
+    expected_sql: >
+      SELECT COUNT(*) FILTER (WHERE n_orders >= 2)::numeric / COUNT(*) FROM (
+        SELECT c.customer_unique_id, COUNT(DISTINCT o.order_id) AS n_orders
+        FROM olist.orders o JOIN olist.customers c ON c.customer_id = o.customer_id
+        WHERE o.order_status NOT IN ('canceled', 'unavailable')
+        GROUP BY c.customer_unique_id) t
+    required_tables: [orders, customers]
+    required_knowledge: [met.repeat_customer_rate, ent.customer, rule.customer_id_is_per_order, rule.eligible_orders]
+    comparison: {abs_tol: 0.0005, percent_ok: true}
+    semantic_checks:
+      - {knowledge: ent.customer, pattern: 'customer_unique_id', expect: present}
+    notes: Grouping by customer_id gives exactly 0 repeat customers.
+
+  - id: p12
+    question: What percentage of delivered orders arrived after the estimated delivery date?
+    category: metric
+    tags: [METRIC_SEMANTICS, TEMPORAL]
+    difficulty: medium
+    expected_sql: >
+      SELECT 100.0 * AVG((order_delivered_customer_date > order_estimated_delivery_date)::int)
+      FROM olist.orders
+      WHERE order_status = 'delivered' AND order_delivered_customer_date IS NOT NULL
+    required_tables: [orders]
+    required_knowledge: [met.late_delivery, rule.delivery_metrics_delivered_only]
+    comparison: {abs_tol: 0.05, percent_ok: true}
+    notes: Timestamp comparison and the right denominator (delivered orders with a delivery date).
+
+  - id: p13
+    question: How many new customers did we acquire in each month of 2018?
+    category: metric
+    tags: [METRIC_SEMANTICS, BUSINESS_IDENTITY, TEMPORAL]
+    difficulty: hard
+    expected_sql: >
+      WITH first_orders AS (
+        SELECT c.customer_unique_id, MIN(o.order_purchase_timestamp) AS first_ts
+        FROM olist.orders o JOIN olist.customers c ON c.customer_id = o.customer_id
+        WHERE o.order_status NOT IN ('canceled', 'unavailable')
+        GROUP BY c.customer_unique_id)
+      SELECT date_trunc('month', first_ts) AS month, COUNT(*) AS new_customers
+      FROM first_orders
+      WHERE first_ts >= '2018-01-01' AND first_ts < '2019-01-01'
+      GROUP BY 1 ORDER BY 1
+    required_tables: [orders, customers]
+    required_knowledge: [met.new_customers, ent.customer, rule.customer_id_is_per_order, rule.eligible_orders]
+    comparison: {order_matters: true, month_key: true}
+    semantic_checks:
+      - {knowledge: ent.customer, pattern: 'customer_unique_id', expect: present}
+      - {knowledge: met.new_customers, pattern: 'min\s*\(', expect: present}
+    notes: Needs first purchase per person, then filtering by month of that first purchase.
+
+  # ------------------------------------------------------------------ trap
+  - id: p14
+    question: How many customers are there?
+    category: trap
+    tags: [BUSINESS_IDENTITY, SEMANTIC_TRAP]
+    difficulty: easy
+    expected_sql: SELECT COUNT(DISTINCT customer_unique_id) FROM olist.customers
+    required_tables: [customers]
+    required_knowledge: [ent.customer, met.number_of_customers, rule.customer_id_is_per_order]
+    semantic_checks:
+      - {knowledge: ent.customer, pattern: 'customer_unique_id', expect: present}
+    notes: COUNT(*) FROM customers = 99,441 (orders); correct is 96,096 people.
+
+  - id: p15
+    question: >
+      Which 5 product categories (English names) have the highest average review score, among
+      categories with at least 500 reviewed orders? Show the average score.
+    category: trap
+    tags: [DOMAIN_SEMANTICS, SEMANTIC_TRAP, MULTI_HOP, RELATIONAL]
+    difficulty: hard
+    expected_sql: >
+      WITH order_category AS (
+        SELECT DISTINCT i.order_id, t.product_category_name_english AS category
+        FROM olist.order_items i
+        JOIN olist.products p ON p.product_id = i.product_id
+        JOIN olist.product_category_translation t ON t.product_category_name = p.product_category_name),
+      order_score AS (
+        SELECT order_id, AVG(review_score) AS score FROM olist.order_reviews GROUP BY order_id)
+      SELECT category, AVG(score) AS avg_score
+      FROM order_category JOIN order_score USING (order_id)
+      GROUP BY category HAVING COUNT(*) >= 500
+      ORDER BY avg_score DESC LIMIT 5
+    required_tables: [order_reviews, order_items, products, product_category_translation]
+    required_knowledge: [rule.review_item_fanout, rule.category_translation, met.average_review_score, ent.review]
+    comparison: {order_matters: true, abs_tol: 0.01}
+    notes: >
+      The naive items x reviews join changes membership (home_appliances enters the top 5) and
+      lowers scores by ~0.03-0.05. abs_tol 0.01 accepts DISTINCT (order, category) with or without
+      averaging an order's multiple reviews first (they differ by <= 0.005).
+
+  - id: p16
+    question: How much revenue came from orders that were paid at least partly with a voucher?
+    category: trap
+    tags: [DOMAIN_SEMANTICS, METRIC_SEMANTICS, SEMANTIC_TRAP]
+    difficulty: hard
+    expected_sql: >
+      SELECT SUM(i.price)
+      FROM olist.order_items i JOIN olist.orders o ON o.order_id = i.order_id
+      WHERE o.order_status NOT IN ('canceled', 'unavailable')
+        AND EXISTS (SELECT 1 FROM olist.order_payments p
+                    WHERE p.order_id = o.order_id AND p.payment_type = 'voucher')
+    required_tables: [order_items, orders, order_payments]
+    required_knowledge: [rule.payment_item_fanout, met.revenue, rule.eligible_orders, rule.payment_value_vs_revenue]
+    comparison: {rel_tol: 0.0001}
+    semantic_checks:
+      - {knowledge: met.revenue, pattern: 'sum\s*\(\s*\w*\.?payment_value', expect: absent}
+    notes: Joining payments to items directly double-counts orders with several voucher payments.
+
+  - id: p17
+    question: What was the total payment value of delivered orders purchased in 2018?
+    category: trap
+    tags: [DOMAIN_SEMANTICS, TEMPORAL, SEMANTIC_TRAP]
+    difficulty: medium
+    expected_sql: >
+      SELECT SUM(p.payment_value)
+      FROM olist.order_payments p JOIN olist.orders o ON o.order_id = p.order_id
+      WHERE o.order_status = 'delivered'
+        AND o.order_purchase_timestamp >= '2018-01-01' AND o.order_purchase_timestamp < '2019-01-01'
+    required_tables: [order_payments, orders]
+    required_knowledge: [rule.payment_value_vs_revenue, rule.time_attribution]
+    comparison: {rel_tol: 0.0001}
+    semantic_checks:
+      - {knowledge: rule.payment_value_vs_revenue, pattern: 'payment_value', expect: present}
+    notes: >
+      Anti-trap: here payment_value IS the right column. Tests whether revenue rules get
+      over-applied (SUM(price) would be wrong).
+
+  # ------------------------------------------------------------- ambiguous
+  - id: p18
+    question: Who are our best customers?
+    category: ambiguous
+    tags: [AMBIGUITY, BUSINESS_IDENTITY, METRIC_SEMANTICS]
+    difficulty: hard
+    expected_sql: >
+      SELECT c.customer_unique_id, SUM(i.price) AS spend
+      FROM olist.order_items i
+      JOIN olist.orders o ON o.order_id = i.order_id
+      JOIN olist.customers c ON c.customer_id = o.customer_id
+      WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      GROUP BY c.customer_unique_id ORDER BY spend DESC LIMIT 10
+    required_tables: [order_items, orders, customers]
+    required_knowledge: [met.best_customers, met.customer_spend, ent.customer, rule.eligible_orders]
+    comparison: {order_matters: true, match_columns: [0]}
+    alternatives:
+      - rationale: Top 10 people by spend, including canceled/unavailable orders
+        sql: >
+          SELECT c.customer_unique_id, SUM(i.price)
+          FROM olist.order_items i
+          JOIN olist.orders o ON o.order_id = i.order_id
+          JOIN olist.customers c ON c.customer_id = o.customer_id
+          GROUP BY c.customer_unique_id ORDER BY 2 DESC LIMIT 10
+        comparison: {order_matters: false, match_columns: [0]}
+      - rationale: Top 10 people by amount paid (payments incl. freight)
+        sql: >
+          SELECT c.customer_unique_id, SUM(p.payment_value) AS paid
+          FROM olist.order_payments p
+          JOIN olist.orders o ON o.order_id = p.order_id
+          JOIN olist.customers c ON c.customer_id = o.customer_id
+          GROUP BY c.customer_unique_id ORDER BY paid DESC LIMIT 10
+        comparison: {order_matters: false, match_columns: [0]}
+    semantic_checks:
+      - {knowledge: ent.customer, pattern: 'customer_unique_id', expect: present}
+    notes: >
+      Organisation definition = top 10 people by spend. Returning customer_id is the trap.
+      (Top 10 by order count is not offered as an alternative: it is tied at the boundary.)
+      10th vs 11th spend: 4400.00 vs 4399.87.
+
+  - id: p19
+    question: Which sellers are doing well?
+    category: ambiguous
+    tags: [AMBIGUITY, METRIC_SEMANTICS]
+    difficulty: hard
+    expected_sql: >
+      SELECT i.seller_id, SUM(i.price) AS revenue
+      FROM olist.order_items i JOIN olist.orders o ON o.order_id = i.order_id
+      WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      GROUP BY i.seller_id ORDER BY revenue DESC LIMIT 10
+    required_tables: [order_items, orders]
+    required_knowledge: [met.seller_performance, met.revenue, ent.seller, rule.eligible_orders]
+    comparison: {order_matters: true, match_columns: [0]}
+    alternatives:
+      - rationale: Top 10 sellers by number of distinct orders
+        sql: >
+          SELECT seller_id, COUNT(DISTINCT order_id) FROM olist.order_items
+          GROUP BY seller_id ORDER BY 2 DESC LIMIT 10
+        comparison: {order_matters: false, match_columns: [0]}
+      - rationale: Top 10 sellers by revenue including canceled orders
+        sql: >
+          SELECT seller_id, SUM(price) FROM olist.order_items GROUP BY seller_id ORDER BY 2 DESC LIMIT 10
+        comparison: {order_matters: false, match_columns: [0]}
+    notes: Organisation definition = top 10 sellers by revenue.
+
+  - id: p20
+    question: Show me customer adoption.
+    category: ambiguous
+    tags: [AMBIGUITY, BUSINESS_IDENTITY, TEMPORAL, METRIC_SEMANTICS]
+    difficulty: hard
+    expected_sql: >
+      WITH first_orders AS (
+        SELECT c.customer_unique_id, MIN(o.order_purchase_timestamp) AS first_ts
+        FROM olist.orders o JOIN olist.customers c ON c.customer_id = o.customer_id
+        WHERE o.order_status NOT IN ('canceled', 'unavailable')
+        GROUP BY c.customer_unique_id)
+      SELECT date_trunc('month', first_ts) AS month, COUNT(*) AS new_customers
+      FROM first_orders GROUP BY 1 ORDER BY 1
+    required_tables: [orders, customers]
+    required_knowledge: [met.new_customers, ent.customer, rule.customer_id_is_per_order]
+    comparison: {order_matters: true, month_key: true}
+    alternatives:
+      - rationale: New customers per month counting all order statuses
+        sql: >
+          WITH f AS (SELECT c.customer_unique_id, MIN(o.order_purchase_timestamp) AS first_ts
+                     FROM olist.orders o JOIN olist.customers c ON c.customer_id = o.customer_id
+                     GROUP BY c.customer_unique_id)
+          SELECT date_trunc('month', first_ts), COUNT(*) FROM f GROUP BY 1 ORDER BY 1
+        comparison: {order_matters: true, month_key: true}
+      - rationale: Distinct active customers per month
+        sql: >
+          SELECT date_trunc('month', o.order_purchase_timestamp), COUNT(DISTINCT c.customer_unique_id)
+          FROM olist.orders o JOIN olist.customers c ON c.customer_id = o.customer_id
+          GROUP BY 1 ORDER BY 1
+        comparison: {order_matters: true, month_key: true}
+    semantic_checks:
+      - {knowledge: ent.customer, pattern: 'customer_unique_id', expect: present}
+    notes: '"Adoption" has no column; the organisation defines it as new customers per month.'

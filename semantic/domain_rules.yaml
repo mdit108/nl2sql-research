@@ -1,0 +1,94 @@
+# E6 — domain knowledge and known pitfalls: things that produce plausible but wrong SQL.
+version: 1
+knowledge_type: domain_rule
+items:
+  - id: rule.customer_id_is_per_order
+    name: "Pitfall: customer_id is per order"
+    content: >
+      COUNT(DISTINCT customers.customer_id) or COUNT(*) FROM customers returns the number of
+      orders (99,441), not the number of people. Anything about customers as people — counts,
+      repeat buyers, spend per customer, first purchase — must group by customer_unique_id.
+    metadata:
+      tables: [customers]
+      columns: [customers.customer_id, customers.customer_unique_id]
+
+  - id: rule.eligible_orders
+    name: Canceled and unavailable orders
+    content: >
+      Sales metrics (revenue, spend, AOV, seller revenue, repeat customers) exclude orders with
+      order_status 'canceled' or 'unavailable'. Do not apply this filter when the question asks
+      about all orders, order statuses or cancellations explicitly.
+    metadata:
+      tables: [orders]
+      columns: [orders.order_status]
+
+  - id: rule.payment_value_vs_revenue
+    name: "Pitfall: payment_value is not revenue"
+    content: >
+      order_payments.payment_value is what the customer paid: product price + freight, plus
+      installment interest, split across payment methods and vouchers. Use it only for questions
+      about amounts paid or payment methods. Product revenue comes from order_items.price.
+    metadata:
+      tables: [order_payments, order_items]
+      columns: [order_payments.payment_value, order_items.price]
+
+  - id: rule.review_item_fanout
+    name: "Pitfall: reviews joined to order_items fan out"
+    content: >
+      Joining order_reviews to order_items repeats an order's review once per item, so orders
+      with many items get extra weight in averages and counts. For review metrics by product,
+      category or seller, first build DISTINCT (order_id, group) pairs, then join reviews.
+    metadata:
+      tables: [order_reviews, order_items]
+      columns: [order_reviews.review_score]
+
+  - id: rule.payment_item_fanout
+    name: "Pitfall: payments joined to order_items fan out"
+    content: >
+      Joining order_payments directly to order_items multiplies rows (items x payments), which
+      inflates SUM(price) and SUM(payment_value). Filter orders with EXISTS / IN on payments, or
+      aggregate each table per order before joining.
+    metadata:
+      tables: [order_payments, order_items]
+      columns: [order_payments.payment_type, order_items.price]
+
+  - id: rule.category_translation
+    name: Category names are Portuguese
+    content: >
+      products.product_category_name is Portuguese (e.g. 'beleza_saude'). Join
+      product_category_translation to report or filter by English names (e.g. 'health_beauty').
+      610 products have no category; inner joins drop them.
+    metadata:
+      tables: [products, product_category_translation]
+      columns: [product_category_translation.product_category_name_english]
+
+  - id: rule.data_coverage
+    name: Data coverage and sparse months
+    content: >
+      Orders run from 2016-09 to 2018-10, but 2016 has only ~330 orders and 2018-09/2018-10 have
+      only 20 orders in total. 2017 is the only complete year. For "2018" time series, months
+      after 2018-08 are nearly empty — include them only if they have data and don't treat them
+      as a collapse in sales.
+    metadata:
+      tables: [orders]
+      columns: [orders.order_purchase_timestamp]
+
+  - id: rule.delivery_metrics_delivered_only
+    name: Delivery metrics use delivered orders only
+    content: >
+      Delivery time and delay metrics only make sense for orders with order_status = 'delivered'
+      and a non-null order_delivered_customer_date. Undelivered orders have NULL delivery dates,
+      and comparisons with NULL silently drop rows.
+    metadata:
+      tables: [orders]
+      columns: [orders.order_delivered_customer_date, orders.order_status]
+
+  - id: rule.time_attribution
+    name: Which date to use
+    content: >
+      Attribute orders, revenue and customers to time using orders.order_purchase_timestamp
+      (when the order was placed), not approval, shipping or delivery dates, unless the question
+      is about those events.
+    metadata:
+      tables: [orders]
+      columns: [orders.order_purchase_timestamp]

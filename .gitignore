@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.env
+.DS_Store
+
+# Olist data is CC BY-NC-SA 4.0: download it, don't redistribute it.
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Experiment outputs are reproducible from the code; keep them local by default.
+experiments/results/*
+!experiments/results/.gitkeep
