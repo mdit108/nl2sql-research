@@ -66,6 +66,20 @@ def embedding_text(item: KnowledgeItem) -> str:
     return f"{item.name}. {item.content}"
 
 
+def item_hash(item: KnowledgeItem) -> str:
+    return hashlib.sha256((embedding_text(item) + json.dumps(item.metadata, sort_keys=True)).encode()).hexdigest()[:12]
+
+
+def stale_knowledge_items(embedding_model: str) -> list[str]:
+    """Ids whose YAML differs from what is indexed in pgvector (or that are missing / extra)."""
+    expected = {i.id: item_hash(i) for i in load_knowledge_items()}
+    with owner_engine().connect() as conn:
+        indexed = dict(conn.execute(text(
+            "SELECT id, content_hash FROM nl2sql.knowledge_items WHERE embedding_model = :m"),
+            {"m": embedding_model}).all())
+    return sorted(k for k in expected.keys() | indexed.keys() if expected.get(k) != indexed.get(k))
+
+
 def index_knowledge(embedder: EmbeddingProvider | None = None) -> int:
     """(Re)build nl2sql.knowledge_items from YAML. Returns the number of items indexed."""
     embedder = embedder or get_embedder()
@@ -82,7 +96,7 @@ def index_knowledge(embedder: EmbeddingProvider | None = None) -> int:
                     "(id, knowledge_type, name, content, metadata, embedding, embedding_model, content_hash) "
                     "VALUES (%s, %s, %s, %s, %s, %s::vector, %s, %s)",
                     (item.id, item.knowledge_type, item.name, item.content, json.dumps(item.metadata),
-                     vec, embedder.model, hashlib.sha256(embedding_text(item).encode()).hexdigest()[:12]),
+                     vec, embedder.model, item_hash(item)),
                 )
         raw.commit()
     finally:

@@ -12,7 +12,8 @@ class LLMResponse:
     text: str
     model: str
     input_tokens: int | None = None
-    output_tokens: int | None = None
+    output_tokens: int | None = None   # includes reasoning tokens, if any
+    reasoning_tokens: int | None = None
     latency_ms: float = 0.0
 
 
@@ -31,24 +32,44 @@ class OpenAICompatibleProvider(LLMProvider):
 
         if settings.llm_api_key is None or not settings.llm_api_key.get_secret_value():
             raise RuntimeError("LLM_API_KEY is not set (see .env.example), or use LLM_PROVIDER=mock")
-        self.client = OpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key.get_secret_value())
+        # Retries with backoff on rate limits / transient errors, so one hiccup doesn't kill a long run.
+        self.client = OpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key.get_secret_value(),
+                             max_retries=5)
         self.model = settings.llm_model
-        self.temperature = settings.llm_temperature
+        # None = the model rejected the parameter and runs at its own default (recorded in the manifest).
+        self.temperature: float | None = settings.llm_temperature
         self.max_tokens = settings.llm_max_tokens
+
+    def _create(self, messages: list[dict]):
+        from openai import BadRequestError
+
+        # max_completion_tokens is the current OpenAI parameter; reasoning models reject max_tokens.
+        kwargs = {"model": self.model, "messages": messages, "max_completion_tokens": self.max_tokens}
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        try:
+            return self.client.chat.completions.create(**kwargs)
+        except BadRequestError as e:
+            if "temperature" in str(e) and "temperature" in kwargs:
+                self.temperature = None  # later calls skip it; concurrent calls retry the same way
+                kwargs.pop("temperature")
+                return self.client.chat.completions.create(**kwargs)
+            raise
 
     def generate(self, prompt: str, system: str | None = None) -> LLMResponse:
         messages = ([{"role": "system", "content": system}] if system else []) + [
             {"role": "user", "content": prompt}]
         start = time.perf_counter()
-        resp = self.client.chat.completions.create(
-            model=self.model, messages=messages, temperature=self.temperature, max_tokens=self.max_tokens)
+        resp = self._create(messages)
         latency = (time.perf_counter() - start) * 1000
         usage = resp.usage
+        details = getattr(usage, "completion_tokens_details", None) if usage else None
         return LLMResponse(
             text=resp.choices[0].message.content or "",
             model=resp.model or self.model,
             input_tokens=usage.prompt_tokens if usage else None,
             output_tokens=usage.completion_tokens if usage else None,
+            reasoning_tokens=getattr(details, "reasoning_tokens", None),
             latency_ms=latency,
         )
 

@@ -4,8 +4,14 @@
     python -m evaluation.compare --run experiments/results/ladder/<run_id>
 
 Writes report.md and charts/*.png into the run directory.
+
+With repeats, accuracy is the mean over all attempts; "range" is the min-max accuracy of the individual
+repeats; a question is "unstable" in a condition if its repeats disagree; fixed/broken transitions use
+each question's majority outcome.
+
 Manual failure labels in <run_dir>/manual_labels.yaml override the automatic ones:
-    p14/E1: {category: BUSINESS_SEMANTICS, note: "..."}
+    p14/E1: {category: BUSINESS_SEMANTICS, note: "..."}      # every repeat
+    p14/E1/2: {category: WRONG_FILTER, note: "..."}          # one repeat
 """
 
 import argparse
@@ -32,10 +38,14 @@ def load_run(run_dir: Path) -> tuple[dict, pd.DataFrame]:
     labels_path = run_dir / "manual_labels.yaml"
     if labels_path.exists():
         for key, label in (yaml.safe_load(labels_path.read_text()) or {}).items():
-            qid, condition = key.split("/")
+            qid, condition, *repeat = key.split("/")
             mask = (df.question_id == qid) & (df.condition == condition)
+            if repeat:
+                mask &= df.repeat == int(repeat[0])
             df.loc[mask, "failure_category"] = label["category"]
             df.loc[mask, "failure_rule"] = f"manual: {label.get('note', '')}"
+    if "repeat" not in df:
+        df["repeat"] = 0
     order = manifest["conditions"]
     df["condition"] = pd.Categorical(df["condition"], categories=order, ordered=True)
     return manifest, df.sort_values(["condition", "question_id"])
@@ -54,11 +64,23 @@ def md_table(frame: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
+def accuracy_range(frame: pd.DataFrame) -> str:
+    per_repeat = frame.groupby("repeat").correct.mean() * 100
+    return f"{per_repeat.min():.0f}–{per_repeat.max():.0f}%" if len(per_repeat) > 1 else "–"
+
+
+def unstable_questions(frame: pd.DataFrame) -> int:
+    return int((frame.groupby("question_id").correct.nunique() > 1).sum())
+
+
 def summary_table(df: pd.DataFrame) -> pd.DataFrame:
     g = df.groupby("condition", observed=True)
     out = pd.DataFrame({
-        "n": g.size(),
+        "Questions": g.question_id.nunique(),
+        "Attempts": g.size(),
         "Result Accuracy": g.correct.apply(pct),
+        "Range across repeats": g.apply(accuracy_range, include_groups=False),
+        "Unstable questions": g.apply(unstable_questions, include_groups=False),
         "Plausible (incl. alt. interpretations)": g.correct_plausible.apply(pct),
         "Execution Accuracy": g.execution_success.apply(pct),
         "SQL Valid": g.sql_valid.apply(pct),
@@ -76,7 +98,7 @@ def summary_table(df: pd.DataFrame) -> pd.DataFrame:
 def by_group(df: pd.DataFrame, column: str, order: list[str] | None = None) -> pd.DataFrame:
     frame = df.explode(column) if isinstance(df[column].iloc[0], list) else df
     table = frame.pivot_table(index="condition", columns=column, values="correct", aggfunc="mean", observed=True)
-    counts = frame[frame.condition == frame.condition.cat.categories[0]].groupby(column).size()
+    counts = frame.groupby(column).question_id.nunique()
     if order:
         table = table[[c for c in order if c in table.columns]]
     table = (100 * table).round(0).astype(int).astype(str) + "%"
@@ -86,20 +108,38 @@ def by_group(df: pd.DataFrame, column: str, order: list[str] | None = None) -> p
 
 
 def question_matrix(df: pd.DataFrame) -> pd.DataFrame:
-    symbol = df.apply(lambda r: "✓" if r.correct else ("~" if r.correct_plausible else "✗"), axis=1)
-    m = df.assign(s=symbol).pivot_table(index="question_id", columns="condition", values="s",
-                                        aggfunc="first", observed=True)
+    """One repeat: ✓ / ~ (alternative interpretation) / ✗. Several: correct attempts out of total."""
+    def cell(frame):
+        if len(frame) == 1:
+            r = frame.iloc[0]
+            return "✓" if r.correct else ("~" if r.correct_plausible else "✗")
+        return f"{int(frame.correct.sum())}/{len(frame)}"
+    m = df.groupby(["question_id", "condition"], observed=True).apply(cell, include_groups=False).unstack()
     m.index.name = "Question"
     return m
 
 
+def effective_temperature(manifest: dict) -> str:
+    if "effective_temperature" in manifest and manifest["effective_temperature"] is None:
+        return "model default (temperature not settable)"
+    return str(manifest.get("effective_temperature", manifest["temperature"]))
+
+
+def comparison_pairs(conditions: list[str]) -> list[tuple[str, str]]:
+    """Consecutive levels within the retrieved chain and within the gold chain, then retrieved vs gold."""
+    retrieved = [c for c in conditions if "-" not in c]
+    gold = [c for c in conditions if c.endswith("-gold")]
+    pairs = list(zip(retrieved, retrieved[1:])) + list(zip(gold, gold[1:]))
+    pairs += [(c.removesuffix("-gold"), c) for c in gold if c.removesuffix("-gold") in retrieved]
+    return pairs
+
+
 def transitions(df: pd.DataFrame) -> pd.DataFrame:
-    """Questions fixed / broken between consecutive conditions. Net gain hides regressions."""
-    wide = df.pivot_table(index="question_id", columns="condition", values="correct", aggfunc="first",
-                          observed=True)
-    cols = list(wide.columns)
+    """Questions fixed / broken between comparable conditions (majority outcome). Net gain hides regressions."""
+    wide = df.pivot_table(index="question_id", columns="condition", values="correct", aggfunc="mean",
+                          observed=True) > 0.5
     rows = []
-    for a, b in zip(cols, cols[1:]):
+    for a, b in comparison_pairs([str(c) for c in wide.columns]):
         fixed = wide.index[(~wide[a].astype(bool)) & wide[b].astype(bool)].tolist()
         broken = wide.index[wide[a].astype(bool) & (~wide[b].astype(bool))].tolist()
         rows.append({"Transition": f"{a} → {b}", "Fixed": len(fixed), "Broken": len(broken),
@@ -126,38 +166,26 @@ def _style(ax, title: str, ylabel: str):
     ax.spines[["top", "right"]].set_visible(False)
 
 
-def charts(df: pd.DataFrame, out: Path) -> list[str]:
-    out.mkdir(exist_ok=True)
-    conditions = list(df.condition.cat.categories)
-    x = range(len(conditions))
-    g = df.groupby("condition", observed=False)
-    files = []
+def _series(df: pd.DataFrame, column: str, scale: float = 1.0) -> tuple[list[str], dict[str, list[float]]]:
+    """Retrieved and gold conditions as two series over the same E0..En axis (gold is NaN where not run)."""
+    conditions = [str(c) for c in df.condition.cat.categories]
+    levels = [c for c in conditions if "-" not in c]
+    means = df.groupby("condition", observed=False)[column].mean() * scale
+    series = {"retrieved context": [means.get(lv, float("nan")) for lv in levels]}
+    if any(c.endswith("-gold") for c in conditions):
+        series["gold context"] = [means.get(f"{lv}-gold", float("nan")) for lv in levels]
+    return levels, series
 
-    fig, ax = plt.subplots(figsize=(8, 4))
-    for col, label in [("correct", "Result accuracy"), ("execution_success", "Execution success")]:
-        y = 100 * g[col].mean()
-        ax.plot(x, y, marker="o", linewidth=2, markersize=6, label=label)
-        ax.annotate(label, (len(conditions) - 1, y.iloc[-1]), xytext=(6, 0), textcoords="offset points",
-                    va="center", fontsize=9)
-    ax.set_xticks(list(x), conditions)
-    ax.set_ylim(0, 105)
-    ax.legend(frameon=False, loc="upper left")
-    _style(ax, "Accuracy by context level", "% of questions")
-    files.append(_save(fig, out / "accuracy_by_level.png"))
 
-    cats = [c for c in CATEGORY_ORDER if c in set(df.category)]
-    fig, axes = plt.subplots(1, len(cats), figsize=(3 * len(cats), 3.2), sharey=True)
-    for ax, cat in zip(axes, cats):
-        sub = df[df.category == cat].groupby("condition", observed=False).correct.mean() * 100
-        ax.plot(x, sub, marker="o", linewidth=2, markersize=5)
-        n = (df[(df.category == cat)].condition == conditions[0]).sum()
-        ax.set_xticks(list(x), conditions, fontsize=7, rotation=90)
-        ax.set_ylim(0, 105)
-        _style(ax, f"{cat} (n={n})", "% correct" if ax is axes[0] else "")
-    fig.suptitle("Result accuracy by question category", x=0.01, ha="left", fontsize=12)
-    files.append(_save(fig, out / "accuracy_by_category.png"))
+def _line_chart(ax, levels, series, ylim=(0, 105)):
+    for label, ys in series.items():
+        ax.plot(range(len(levels)), ys, marker="o", linewidth=2, markersize=6, label=label)
+    ax.set_xticks(range(len(levels)), levels)
+    if ylim:
+        ax.set_ylim(*ylim)
 
-    ft = failure_table(df).reindex(conditions, fill_value=0)
+
+def _failure_chart(ft: pd.DataFrame, out: Path) -> str:
     fig, ax = plt.subplots(figsize=(1 + 0.9 * len(ft.columns), 0.5 + 0.45 * len(ft)))
     im = ax.imshow(ft.values, aspect="auto")  # default sequential colormap
     ax.set_xticks(range(len(ft.columns)), ft.columns, rotation=40, ha="right", fontsize=8)
@@ -168,19 +196,66 @@ def charts(df: pd.DataFrame, out: Path) -> list[str]:
             if ft.values[i, j]:
                 ax.text(j, i, ft.values[i, j], ha="center", va="center", fontsize=8,
                         color="black" if ft.values[i, j] > vmax / 2 else "white")
-    fig.colorbar(im, ax=ax, label="failed questions")
+    fig.colorbar(im, ax=ax, label="failed attempts")
     ax.set_title("Failure categories by level", loc="left", fontsize=11)
-    files.append(_save(fig, out / "failure_categories.png"))
+    return _save(fig, out / "failure_categories.png")
+
+
+def charts(df: pd.DataFrame, out: Path) -> list[str]:
+    out.mkdir(exist_ok=True)
+    for old in out.glob("*.png"):  # never leave a chart from an earlier report behind
+        old.unlink()
+    files = []
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    levels, acc = _series(df, "correct", 100)
+    _, exe = _series(df, "execution_success", 100)
+    _line_chart(ax, levels, {f"Result accuracy, {k}": v for k, v in acc.items()}
+                | {"Execution success, retrieved context": exe["retrieved context"]})
+    ax.legend(frameon=False, loc="lower right", fontsize=9)
+    _style(ax, "Accuracy by context level", "% of questions")
+    files.append(_save(fig, out / "accuracy_by_level.png"))
+
+    cats = [c for c in CATEGORY_ORDER if c in set(df.category)]
+    fig, axes = plt.subplots(1, len(cats), figsize=(3.2 * len(cats), 3.4), sharey=True)
+    for ax, cat in zip(axes, cats):
+        sub = df[df.category == cat]
+        levels, acc = _series(sub, "correct", 100)
+        _line_chart(ax, levels, acc)
+        ax.tick_params(axis="x", labelsize=8)
+        _style(ax, f"{cat} (n={sub.question_id.nunique()})", "% correct" if ax is axes[0] else "")
+    axes[0].legend(frameon=False, loc="upper left", fontsize=8)
+    fig.suptitle("Result accuracy by question category", x=0.01, ha="left", fontsize=12)
+    files.append(_save(fig, out / "accuracy_by_category.png"))
+
+    conditions = list(df.condition.cat.categories)
+    ft = failure_table(df).reindex(conditions, fill_value=0)
+    if ft.size and ft.values.sum():
+        files.append(_failure_chart(ft, out))
 
     for col, title, ylabel, fname in [
         ("total_latency_ms", "Average total latency by level", "ms", "latency.png"),
         ("input_tokens", "Average input tokens by level", "tokens", "tokens.png"),
+        ("output_tokens", "Average output tokens by level (incl. reasoning)", "tokens", "output_tokens.png"),
     ]:
         fig, ax = plt.subplots(figsize=(8, 3.5))
-        y = g[col].mean()
-        bars = ax.bar(list(x), y, width=0.6)
-        ax.bar_label(bars, labels=[f"{v:,.0f}" for v in y], fontsize=8, padding=2)
-        ax.set_xticks(list(x), conditions)
+        levels, series = _series(df, col)
+        width = 0.8 / len(series)
+        for k, (label, ys) in enumerate(series.items()):
+            xs, hs = [], []
+            for i, v in enumerate(ys):
+                if pd.isna(v):
+                    continue
+                present = [n for n, vals in enumerate(series.values()) if not pd.isna(vals[i])]
+                # Centre the bars that exist at this level (E0-E3 have no gold bar).
+                xs.append(i + (present.index(k) - (len(present) - 1) / 2) * width)
+                hs.append(v)
+            bars = ax.bar(xs, hs, width=width * 0.92, label=label)
+            ax.bar_label(bars, labels=[f"{v:,.0f}" for v in hs], fontsize=7, padding=2)
+        ax.set_xticks(range(len(levels)), levels)
+        ax.margins(y=0.15)
+        if len(series) > 1:
+            ax.legend(frameon=False, fontsize=8, loc="lower left", bbox_to_anchor=(0, 1.08), ncol=len(series))
         _style(ax, title, ylabel)
         files.append(_save(fig, out / fname))
     return files
@@ -205,17 +280,17 @@ def main() -> None:
 
     sections = [
         f"# Run {manifest['run_id']}",
-        f"Model `{manifest['model']}` · temperature {manifest['temperature']} · prompt "
+        f"Model `{manifest['model']}` · temperature {effective_temperature(manifest)} · prompt "
         f"`{manifest['prompt_version']}` ({manifest['prompt_hash']}) · semantic layer "
         f"{manifest['semantic_layer_hash']} · embeddings `{manifest['embedding_model']}` · top-k/type "
         f"{manifest['top_k_per_type']} · benchmark {manifest['benchmark_version']} ({manifest['benchmark_hash']}) · "
-        f"db {manifest['database']['hash']}",
+        f"repeats {manifest.get('repeats', 1)} · db {manifest['database']['hash']}",
         "## Summary by level", md_table(summary_table(df)),
         "## Result accuracy by question category", md_table(by_group(df, "category", CATEGORY_ORDER)),
         "## Result accuracy by knowledge tag (a question can have several)", md_table(by_group(df, "tags")),
-        "## Fixed vs broken between consecutive levels", md_table(transitions(df)),
-        "## Failure categories (count of failed questions)", md_table(failure_table(df)),
-        "## Per-question results (✓ correct, ~ alternative interpretation, ✗ wrong)",
+        "## Fixed vs broken (consecutive levels; then retrieved vs gold at the same level)", md_table(transitions(df)),
+        "## Failure categories (count of failed attempts)", md_table(failure_table(df)),
+        "## Per-question results (✓ correct, ~ alternative interpretation, ✗ wrong; k/n with repeats)",
         md_table(question_matrix(df)),
     ]
     files = charts(df, run_dir / "charts")

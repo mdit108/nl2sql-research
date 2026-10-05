@@ -21,7 +21,7 @@ def main() -> None:
     s = get_settings()
     print(f"LLM provider={s.llm_provider} base_url={s.llm_base_url} model={s.llm_model}")
     resp = get_llm(s).generate("Reply with exactly: SELECT 1")
-    print(f"  ok: {resp.text.strip()[:60]!r} ({resp.latency_ms:.0f} ms, in={resp.input_tokens} out={resp.output_tokens})")
+    print(f"  ok: {resp.text.strip()[:60]!r} ({resp.latency_ms:.0f} ms, in={resp.input_tokens} out={resp.output_tokens} reasoning={resp.reasoning_tokens})")
 
     if args.embeddings:
         from openai import OpenAI

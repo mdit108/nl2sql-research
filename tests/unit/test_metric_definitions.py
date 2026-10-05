@@ -28,8 +28,17 @@ def test_all_knowledge_items_reference_known_tables():
         assert set(i.metadata.get("tables", [])) <= DESCRIBED_TABLES, i.id
 
 
-def test_benchmark_required_knowledge_exists():
+def test_metrics_are_self_contained():
+    """A retrieved metric must not depend on a term defined only in another item."""
+    for m in (i for i in load_knowledge_items() if i.knowledge_type == "metric"):
+        assert "eligible" not in m.content.lower(), m.id
+        if "exclud" in m.content.lower() and "status" in m.metadata.get("sql_definition", ""):
+            assert "'canceled', 'unavailable'" in m.content, m.id
+
+
+def test_benchmark_knowledge_ids_exist():
     ids = {i.id for i in load_knowledge_items()}
     for q in load_benchmark().questions:
         assert set(q.required_knowledge) <= ids, q.id
+        assert set(q.related_knowledge) <= ids, q.id
         assert {c.knowledge for c in q.semantic_checks} <= ids, q.id

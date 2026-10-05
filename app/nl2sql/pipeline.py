@@ -36,6 +36,7 @@ class Trace(BaseModel):
     llm_output: str
     input_tokens: int | None
     output_tokens: int | None
+    reasoning_tokens: int | None = None
     llm_latency_ms: float
     generated_sql: str
     sql_valid: bool
@@ -87,6 +88,7 @@ class NL2SQLPipeline:
                        for i in (r.items if r else [])],
             retrieval_latency_ms=round(r.latency_ms, 1) if r else 0.0,
             model=llm.model, llm_output=llm.text, input_tokens=llm.input_tokens, output_tokens=llm.output_tokens,
+            reasoning_tokens=llm.reasoning_tokens,
             llm_latency_ms=round(llm.latency_ms, 1),
             generated_sql=sql, sql_valid=validation.valid, validation_stage=validation.stage,
             validation_error=validation.error, tables_used=validation.tables,

@@ -1,11 +1,14 @@
-# 20-question pilot benchmark.
+# Pilot benchmark (26 questions). Used for development: prompts, retrieval and the semantic layer may be
+# tuned against it, so it is not a held-out test set.
 #
 # Fields per question
 #   id, question, category, tags, difficulty
 #   expected_sql        trusted SQL; its result (expected/<id>.json) is the ground truth
 #   required_tables     tables a correct answer must touch
-#   required_knowledge  semantic knowledge item ids (semantic/*.yaml) a correct answer depends on;
-#                       used for gold context and for retrieval precision/recall
+#   required_knowledge  the MINIMAL set of knowledge items (semantic/*.yaml) that together state everything a
+#                       correct answer needs beyond the E3 schema. Used as gold context and for retrieval recall.
+#   related_knowledge   other relevant items that are redundant given required_knowledge. Retrieving them counts
+#                       as relevant for precision, but they are not needed for recall.
 #   comparison          how results are compared (see evaluation/compare_results.py)
 #   alternatives        other *reasonable* interpretations (ambiguous questions only) -> "plausible" score
 #   semantic_checks     regex checks on the generated SQL, used to label failures
@@ -15,7 +18,7 @@
 # Categories: schema | relational | metric | trap | ambiguous
 # Tags: STRUCTURAL RELATIONAL DESCRIPTIVE BUSINESS_IDENTITY METRIC_SEMANTICS DOMAIN_SEMANTICS
 #       AMBIGUITY TEMPORAL MULTI_HOP SEMANTIC_TRAP
-version: pilot-1
+version: pilot-2
 questions:
 
   # ---------------------------------------------------------------- schema
@@ -62,6 +65,40 @@ questions:
     required_knowledge: []
     comparison: {abs_tol: 0.01}
     notes: Needs the enum value 'credit_card'.
+
+  - id: p25
+    question: Which month in 2017 had the largest increase in the number of orders compared with the previous month?
+    category: schema
+    tags: [STRUCTURAL, TEMPORAL]
+    difficulty: hard
+    expected_sql: >
+      WITH monthly AS (
+        SELECT date_trunc('month', order_purchase_timestamp) AS month, COUNT(*) AS n_orders
+        FROM olist.orders GROUP BY 1),
+      changes AS (
+        SELECT month, n_orders - LAG(n_orders) OVER (ORDER BY month) AS increase FROM monthly)
+      SELECT month, increase FROM changes
+      WHERE month >= '2017-01-01' AND month < '2018-01-01'
+      ORDER BY increase DESC LIMIT 1
+    required_tables: [orders]
+    required_knowledge: []
+    related_knowledge: [met.number_of_orders, rule.time_attribution]
+    comparison: {month_key: true, match_columns: [0]}
+    notes: >
+      Self-referencing time comparison (window function or self-join). Answer: 2017-11 (+2,913).
+      January 2017 must be compared with December 2016, which exists (1 order); 2016-11 has no orders at all.
+
+  - id: p26
+    question: What percentage of reviews include a written comment message?
+    category: schema
+    tags: [STRUCTURAL, DESCRIPTIVE]
+    difficulty: easy
+    expected_sql: >
+      SELECT 100.0 * AVG((review_comment_message IS NOT NULL)::int) FROM olist.order_reviews
+    required_tables: [order_reviews]
+    required_knowledge: []
+    comparison: {abs_tol: 0.05, percent_ok: true}
+    notes: NULL handling; empty comments are stored as NULL. Answer ~41.3%.
 
   # ------------------------------------------------------------ relational
   - id: p05
@@ -123,6 +160,72 @@ questions:
       Sellers link to orders only via order_items. COUNT(*) instead of COUNT(DISTINCT order_id)
       changes the ranking. No ties at the top-10 boundary (checked: 1080 vs 982).
 
+  - id: p21
+    question: How many sellers have a zip code prefix with no matching row in the geolocation table?
+    category: relational
+    tags: [RELATIONAL]
+    difficulty: medium
+    expected_sql: >
+      SELECT COUNT(*) FROM olist.sellers s
+      LEFT JOIN olist.geolocation g ON g.geolocation_zip_code_prefix = s.seller_zip_code_prefix
+      WHERE g.geolocation_zip_code_prefix IS NULL
+    required_tables: [sellers, geolocation]
+    required_knowledge: []
+    notes: Soft join with no foreign key (documented at E2); needs an anti-join. Answer 7.
+
+  - id: p22
+    question: How many orders contain items from more than one seller?
+    category: relational
+    tags: [RELATIONAL]
+    difficulty: medium
+    expected_sql: >
+      SELECT COUNT(*) FROM (
+        SELECT order_id FROM olist.order_items GROUP BY order_id HAVING COUNT(DISTINCT seller_id) > 1) t
+    required_tables: [order_items]
+    required_knowledge: []
+    related_knowledge: [ent.seller, ent.order]
+    notes: Sellers attach to line items, not orders. Answer 1,278.
+
+  - id: p23
+    question: >
+      For each seller state, how many distinct orders contain an item sold by a seller in that state to a
+      customer located in a different state?
+    category: relational
+    tags: [RELATIONAL, MULTI_HOP]
+    difficulty: hard
+    expected_sql: >
+      SELECT s.seller_state, COUNT(DISTINCT i.order_id)
+      FROM olist.order_items i
+      JOIN olist.sellers s ON s.seller_id = i.seller_id
+      JOIN olist.orders o ON o.order_id = i.order_id
+      JOIN olist.customers c ON c.customer_id = o.customer_id
+      WHERE s.seller_state <> c.customer_state
+      GROUP BY s.seller_state
+    required_tables: [order_items, sellers, orders, customers]
+    required_knowledge: []
+    related_knowledge: [ent.customer_location, ent.seller]
+    notes: >
+      Two join paths from order_items (to sellers, and via orders to customers), then a cross-entity filter.
+      Worded with "sold", not "shipped": "shipped" reasonably implies a carrier-date filter.
+
+  - id: p24
+    question: Which 5 customer states have the highest average number of items per order?
+    category: relational
+    tags: [RELATIONAL, MULTI_HOP]
+    difficulty: hard
+    expected_sql: >
+      SELECT c.customer_state, AVG(t.n_items) AS avg_items
+      FROM (SELECT order_id, COUNT(*) AS n_items FROM olist.order_items GROUP BY order_id) t
+      JOIN olist.orders o ON o.order_id = t.order_id
+      JOIN olist.customers c ON c.customer_id = o.customer_id
+      GROUP BY c.customer_state ORDER BY avg_items DESC LIMIT 5
+    required_tables: [order_items, orders, customers]
+    required_knowledge: []
+    comparison: {match_columns: [0]}
+    notes: >
+      Two-level aggregation across a join. Compared as a set: 4th and 5th (SC 1.1561, MS 1.1551) are too
+      close for rounded output to order reliably; 6th (PR 1.1485) is clearly outside.
+
   # ---------------------------------------------------------------- metric
   - id: p09
     question: What was the total revenue in 2017?
@@ -135,12 +238,13 @@ questions:
       WHERE o.order_status NOT IN ('canceled', 'unavailable')
         AND o.order_purchase_timestamp >= '2017-01-01' AND o.order_purchase_timestamp < '2018-01-01'
     required_tables: [order_items, orders]
-    required_knowledge: [met.revenue, rule.eligible_orders, rule.payment_value_vs_revenue, rule.time_attribution]
+    required_knowledge: [met.revenue]
+    related_knowledge: [rule.canceled_orders, rule.payment_value_vs_revenue, rule.time_attribution]
     comparison: {rel_tol: 0.0001}
     semantic_checks:
       - {knowledge: met.revenue, pattern: 'payment_value', expect: absent}
       - {knowledge: met.revenue, pattern: 'freight_value', expect: absent}
-      - {knowledge: rule.eligible_orders, pattern: 'canceled', expect: present}
+      - {knowledge: rule.canceled_orders, pattern: 'canceled', expect: present}
     notes: "Three ways to be wrong: payments instead of price, adding freight, including canceled orders."
 
   - id: p10
@@ -155,7 +259,8 @@ questions:
         WHERE o.order_status NOT IN ('canceled', 'unavailable')
         GROUP BY i.order_id) t
     required_tables: [order_items, orders]
-    required_knowledge: [met.average_order_value, met.revenue, rule.eligible_orders]
+    required_knowledge: [met.average_order_value]
+    related_knowledge: [met.revenue, rule.canceled_orders]
     comparison: {abs_tol: 0.01}
     semantic_checks:
       - {knowledge: met.average_order_value, pattern: 'payment_value', expect: absent}
@@ -173,7 +278,8 @@ questions:
         WHERE o.order_status NOT IN ('canceled', 'unavailable')
         GROUP BY c.customer_unique_id) t
     required_tables: [orders, customers]
-    required_knowledge: [met.repeat_customer_rate, ent.customer, rule.customer_id_is_per_order, rule.eligible_orders]
+    required_knowledge: [met.repeat_customer_rate]
+    related_knowledge: [ent.customer, met.number_of_customers, rule.customer_id_is_per_order, rule.canceled_orders]
     comparison: {abs_tol: 0.0005, percent_ok: true}
     semantic_checks:
       - {knowledge: ent.customer, pattern: 'customer_unique_id', expect: present}
@@ -189,7 +295,8 @@ questions:
       FROM olist.orders
       WHERE order_status = 'delivered' AND order_delivered_customer_date IS NOT NULL
     required_tables: [orders]
-    required_knowledge: [met.late_delivery, rule.delivery_metrics_delivered_only]
+    required_knowledge: [met.late_delivery]
+    related_knowledge: [rule.delivery_metrics_delivered_only]
     comparison: {abs_tol: 0.05, percent_ok: true}
     notes: Timestamp comparison and the right denominator (delivered orders with a delivery date).
 
@@ -209,12 +316,15 @@ questions:
       WHERE first_ts >= '2018-01-01' AND first_ts < '2019-01-01'
       GROUP BY 1 ORDER BY 1
     required_tables: [orders, customers]
-    required_knowledge: [met.new_customers, ent.customer, rule.customer_id_is_per_order, rule.eligible_orders]
+    required_knowledge: [met.new_customers, rule.data_coverage]
+    related_knowledge: [ent.customer, rule.customer_id_is_per_order, rule.canceled_orders, rule.time_attribution]
     comparison: {order_matters: true, month_key: true}
     semantic_checks:
       - {knowledge: ent.customer, pattern: 'customer_unique_id', expect: present}
       - {knowledge: met.new_customers, pattern: 'min\s*\(', expect: present}
-    notes: Needs first purchase per person, then filtering by month of that first purchase.
+    notes: >
+      Needs first purchase per person, then filtering by month of that first purchase. Months without data
+      (2018-09 onwards) are omitted per rule.data_coverage; zero-filling them to December is a different answer.
 
   # ------------------------------------------------------------------ trap
   - id: p14
@@ -224,7 +334,8 @@ questions:
     difficulty: easy
     expected_sql: SELECT COUNT(DISTINCT customer_unique_id) FROM olist.customers
     required_tables: [customers]
-    required_knowledge: [ent.customer, met.number_of_customers, rule.customer_id_is_per_order]
+    required_knowledge: [ent.customer]
+    related_knowledge: [met.number_of_customers, rule.customer_id_is_per_order]
     semantic_checks:
       - {knowledge: ent.customer, pattern: 'customer_unique_id', expect: present}
     notes: COUNT(*) FROM customers = 99,441 (orders); correct is 96,096 people.
@@ -249,7 +360,8 @@ questions:
       GROUP BY category HAVING COUNT(*) >= 500
       ORDER BY avg_score DESC LIMIT 5
     required_tables: [order_reviews, order_items, products, product_category_translation]
-    required_knowledge: [rule.review_item_fanout, rule.category_translation, met.average_review_score, ent.review]
+    required_knowledge: [ent.product, met.average_review_score]
+    related_knowledge: [ent.review, rule.review_item_fanout, rule.category_translation]
     comparison: {order_matters: true, abs_tol: 0.01}
     notes: >
       The naive items x reviews join changes membership (home_appliances enters the top 5) and
@@ -268,7 +380,8 @@ questions:
         AND EXISTS (SELECT 1 FROM olist.order_payments p
                     WHERE p.order_id = o.order_id AND p.payment_type = 'voucher')
     required_tables: [order_items, orders, order_payments]
-    required_knowledge: [rule.payment_item_fanout, met.revenue, rule.eligible_orders, rule.payment_value_vs_revenue]
+    required_knowledge: [met.revenue, rule.payment_item_fanout]
+    related_knowledge: [rule.payment_value_vs_revenue, rule.canceled_orders]
     comparison: {rel_tol: 0.0001}
     semantic_checks:
       - {knowledge: met.revenue, pattern: 'sum\s*\(\s*\w*\.?payment_value', expect: absent}
@@ -285,7 +398,8 @@ questions:
       WHERE o.order_status = 'delivered'
         AND o.order_purchase_timestamp >= '2018-01-01' AND o.order_purchase_timestamp < '2019-01-01'
     required_tables: [order_payments, orders]
-    required_knowledge: [rule.payment_value_vs_revenue, rule.time_attribution]
+    required_knowledge: []
+    related_knowledge: [rule.payment_value_vs_revenue, rule.time_attribution]
     comparison: {rel_tol: 0.0001}
     semantic_checks:
       - {knowledge: rule.payment_value_vs_revenue, pattern: 'payment_value', expect: present}
@@ -307,7 +421,8 @@ questions:
       WHERE o.order_status NOT IN ('canceled', 'unavailable')
       GROUP BY c.customer_unique_id ORDER BY spend DESC LIMIT 10
     required_tables: [order_items, orders, customers]
-    required_knowledge: [met.best_customers, met.customer_spend, ent.customer, rule.eligible_orders]
+    required_knowledge: [met.best_customers]
+    related_knowledge: [met.customer_spend, ent.customer, rule.canceled_orders]
     comparison: {order_matters: true, match_columns: [0]}
     alternatives:
       - rationale: Top 10 people by spend, including canceled/unavailable orders
@@ -344,7 +459,8 @@ questions:
       WHERE o.order_status NOT IN ('canceled', 'unavailable')
       GROUP BY i.seller_id ORDER BY revenue DESC LIMIT 10
     required_tables: [order_items, orders]
-    required_knowledge: [met.seller_performance, met.revenue, ent.seller, rule.eligible_orders]
+    required_knowledge: [met.seller_performance]
+    related_knowledge: [met.revenue, ent.seller, rule.canceled_orders]
     comparison: {order_matters: true, match_columns: [0]}
     alternatives:
       - rationale: Top 10 sellers by number of distinct orders
@@ -372,7 +488,8 @@ questions:
       SELECT date_trunc('month', first_ts) AS month, COUNT(*) AS new_customers
       FROM first_orders GROUP BY 1 ORDER BY 1
     required_tables: [orders, customers]
-    required_knowledge: [met.new_customers, ent.customer, rule.customer_id_is_per_order]
+    required_knowledge: [met.new_customers]
+    related_knowledge: [ent.customer, rule.customer_id_is_per_order]
     comparison: {order_matters: true, month_key: true}
     alternatives:
       - rationale: New customers per month counting all order statuses

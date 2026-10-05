@@ -15,8 +15,10 @@ and where more context stops helping. One pipeline; only the context changes (th
 | E7 | worked examples | *not built yet* |
 | E8 | validation + one correction | *not built yet* |
 
-Any level from E4 up can also run in **gold** mode (`E5-gold`). In gold mode the benchmark's hand-picked knowledge
-items replace retrieval, which separates *retrieval failures* from *reasoning failures*.
+Any level from E4 up can also run in **gold** mode (`E5-gold`). Gold mode replaces retrieval with each question's
+`required_knowledge` items (the minimal set it needs), which separates *retrieval failures* from *reasoning failures*.
+
+Findings so far: [`docs/pilot-review.md`](docs/pilot-review.md). Research design: [`docs/research-notes.md`](docs/research-notes.md).
 
 ## How it works
 
@@ -45,6 +47,8 @@ question ─► context builder ─► prompt (prompts/generation/v1.md) ─► 
 | Result comparison | `evaluation/compare_results.py` |
 | Failure classification | `evaluation/failures.py` |
 | Runner and report | `evaluation/run.py`, `evaluation/compare.py` |
+| Benchmark | `benchmark/pilot.yaml` (26 questions) + `benchmark/expected/*.json` (ground truth) |
+| Semantic layer | `semantic/*.yaml` (descriptions, relationships, entities, metrics, domain rules) |
 
 ## Setup (no Docker)
 
@@ -105,25 +109,52 @@ pytest
 
 The `Makefile` wraps these steps: `make setup`, then `make test`.
 
+## Asking a single question
+
+```bash
+python scripts/ask.py "How many customers are there?" --level E3
+python scripts/ask.py "What is the average order value?" --level E6 --show-prompt
+python scripts/ask.py "What is the average order value?" --level E6 --gold met.average_order_value
+```
+
+Prints the retrieved knowledge (with similarities), the generated SQL, the result, tokens and latency.
+Knowledge ids are the `id:` fields in `semantic/entities.yaml`, `metrics.yaml` and `domain_rules.yaml`.
+
 ## Running experiments
 
 ```bash
-python scripts/check_providers.py                  # is the LLM reachable?
-python -m evaluation.run --llm gold-sql --name selftest # gold SQL must score 100% (checks the evaluator)
-python -m evaluation.run                           # E0..E6 on the pilot
-python -m evaluation.run --conditions E4-gold,E5-gold,E6-gold
-python -m evaluation.compare                       # report.md + charts/ in the run directory
+python scripts/check_providers.py                          # is the LLM reachable?
+python -m evaluation.run --llm gold-sql --repeats 1        # self-test: gold SQL must score 100%
+make pilot                                                 # E0..E6 + E4..E6 gold, 3 repeats, then the report
+python -m evaluation.run --conditions E3,E5 --questions p10,p11 --repeats 1   # a quick slice
+python -m evaluation.compare --run experiments/results/ladder/<run_id>
 ```
 
-Each run writes to `experiments/results/<name>/<run_id>/`:
-- `manifest.json`: model, temperature, prompt version and hash, semantic-layer hash, embedding model, top-k, benchmark hash, database fingerprint, PostgreSQL version and git commit.
-- `records.jsonl`: one evaluated record per question × condition.
+- **Repeats** (default 3): some models (including the one used for the pilot) only run at their default
+  temperature, so each question × condition is run several times. The report shows mean accuracy, the range
+  across repeats, and how many questions were unstable.
+- **Guards**: the runner refuses to start if the ground truth was computed on different data, or if
+  `semantic/*.yaml` changed since the last `python scripts/index_knowledge.py`.
+
+Each run writes to `experiments/results/<name>/<run_id>/` (git-ignored):
+- `manifest.json`: model, requested and effective temperature, prompt version and hash, semantic-layer hash, embedding model, top-k, repeats, benchmark version and hash, database fingerprint, PostgreSQL version, git commit.
+- `records.jsonl`: one evaluated record per question × condition × repeat.
 - `traces.jsonl`: the full prompt, raw LLM output and result rows.
+- `report.md` and `charts/`: written by `evaluation.compare`.
 
-To correct a failure label after manual inspection, add it to `<run_dir>/manual_labels.yaml`:
+To correct a failure label after manual inspection, add it to `<run_dir>/manual_labels.yaml`
+and re-run `evaluation.compare`:
 ```yaml
-p14/E1: {category: BUSINESS_SEMANTICS, note: counted customer_id}
+p14/E1: {category: BUSINESS_SEMANTICS, note: counted customer_id}     # all repeats
+p15/E5/2: {category: OTHER, note: rounding}                           # one repeat
 ```
+
+## Editing the semantic layer or benchmark
+
+- After editing `semantic/*.yaml`, run `python scripts/index_knowledge.py`.
+- Every knowledge item must be **self-contained**: it is retrieved on its own, so it must not rely on a term
+  that only another item defines. `tests/unit/test_metric_definitions.py` checks this for metrics.
+- After editing `benchmark/pilot.yaml`, run `python -m evaluation.ground_truth`.
 
 ## API
 
@@ -133,11 +164,22 @@ curl -s localhost:8000/api/v1/query -H 'content-type: application/json' \
   -d '{"question": "How many customers are there?", "level": "E4"}'
 ```
 Endpoints: `POST /api/v1/query`, `GET /api/v1/schema`, `GET /api/v1/metrics`, `GET /api/v1/health`.
+Interactive docs at `http://localhost:8000/docs`.
+
+`POST /api/v1/query` fields:
+- `question`
+- `level`: `E0`–`E6`, default `E6`
+- `context_mode`: `retrieved` (default) or `gold`
+- `top_k`: items retrieved per knowledge type; default `RETRIEVAL_TOP_K`
+- `knowledge_ids`: the items to use in `gold` mode
+
+The response is the full trace: retrieved items and similarities, prompt, SQL, result rows, tokens and latencies.
 
 ## Configuration
 
 Everything is read from `.env`; see `.env.example`.
 - The LLM can be any OpenAI-compatible `/chat/completions` endpoint (a hosted API, or a local server such as vLLM or Ollama). `LLM_PROVIDER=mock` needs no key.
+- `LLM_TEMPERATURE` is sent if the model accepts it; if the model rejects it, the request is retried without it and the manifest records `effective_temperature: null`.
 - Embeddings default to a local model (`fastembed`, `BAAI/bge-small-en-v1.5`), so retrieval is free, offline and deterministic. `EMBEDDING_PROVIDER=openai_compatible` switches to an API endpoint.
 
 ## Dataset

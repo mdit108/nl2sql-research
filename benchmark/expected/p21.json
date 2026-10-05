@@ -1,10 +1,10 @@
 {
  "columns": [
-  "sum"
+  "count"
  ],
  "rows": [
   [
-   8452975.2
+   7
   ]
  ],
  "alternatives": [],

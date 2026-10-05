@@ -5,8 +5,11 @@ Rules (in order):
      must equal the expected value. Column names never matter.
   2. Row counts must match.
   3. Every expected column (or those in `match_columns`) must be matched by a distinct generated
-     column with the same values. Extra generated columns are allowed; column order is ignored.
-  4. Rows are compared on the matched columns: as sequences if `order_matters`, else as multisets.
+     column with the same multiset of values. Extra generated columns are allowed; column order is ignored.
+  4. Rows are compared on the matched columns: as multisets, or, if `order_matters`, position by
+     position — except that consecutive expected rows whose numeric values are all equal within
+     tolerance form a "tie block" and may appear in any order inside that block
+     (e.g. 4.2447 and 4.2381 are tied at abs_tol=0.01, so their order is not meaningful).
 
 Values: numbers compare with rel/abs tolerance (and optionally x100 for percentages),
 NULL == NULL, timestamps compare as ISO strings, `month_key` maps any date-like value to YYYY-MM.
@@ -69,9 +72,38 @@ def _column(rows, j):
 
 
 def _columns_match(exp_col, gen_col, opts) -> bool:
-    if not opts.order_matters:
-        exp_col, gen_col = sorted(exp_col, key=_sort_key), sorted(gen_col, key=_sort_key)
+    """Same values regardless of order; row order is checked afterwards on whole rows."""
+    exp_col, gen_col = sorted(exp_col, key=_sort_key), sorted(gen_col, key=_sort_key)
     return all(values_equal(a, b, opts) for a, b in zip(exp_col, gen_col))
+
+
+def _rows_equal(a, b, opts) -> bool:
+    return all(values_equal(x, y, opts) for x, y in zip(a, b))
+
+
+def _tied(a, b, opts) -> bool:
+    """Two expected rows are tied if they have numeric values and all of them are equal within tolerance."""
+    numeric = [i for i, (x, y) in enumerate(zip(a, b)) if isinstance(x, float) and isinstance(y, float)]
+    return bool(numeric) and all(values_equal(a[i], b[i], opts) for i in numeric)
+
+
+def _tie_blocks(rows, opts) -> list[tuple[int, int]]:
+    blocks, start = [], 0
+    for i in range(1, len(rows) + 1):
+        if i == len(rows) or not _tied(rows[i - 1], rows[i], opts):
+            blocks.append((start, i))
+            start = i
+    return blocks
+
+
+def _same_rows_any_order(exp_rows, gen_rows, opts) -> bool:
+    unused = list(gen_rows)
+    for row in exp_rows:
+        match = next((g for g in unused if _rows_equal(row, g, opts)), None)
+        if match is None:
+            return False
+        unused.remove(match)
+    return True
 
 
 def compare_results(expected_rows: list[list], generated_rows: list[list], opts: Comparison) -> CompareResult:
@@ -101,10 +133,15 @@ def compare_results(expected_rows: list[list], generated_rows: list[list], opts:
 
     exp_rows = [[r[j] for j in wanted] for r in exp]
     gen_rows = [[r[mapping[j]] for j in wanted] for r in gen]
-    if not opts.order_matters:
-        exp_rows, gen_rows = sorted(exp_rows, key=lambda r: [_sort_key(v) for v in r]), \
-            sorted(gen_rows, key=lambda r: [_sort_key(v) for v in r])
-    for a, b in zip(exp_rows, gen_rows):
-        if not all(values_equal(x, y, opts) for x, y in zip(a, b)):
+    if opts.order_matters:
+        for start, end in _tie_blocks(exp_rows, opts):
+            if not _same_rows_any_order(exp_rows[start:end], gen_rows[start:end], opts):
+                return CompareResult(False, f"row mismatch at position {start}: expected {exp_rows[start]}, "
+                                            f"got {gen_rows[start]}")
+        return CompareResult(True, "rows match (ordered)")
+
+    key = lambda r: [_sort_key(v) for v in r]  # noqa: E731
+    for a, b in zip(sorted(exp_rows, key=key), sorted(gen_rows, key=key)):
+        if not _rows_equal(a, b, opts):
             return CompareResult(False, f"row mismatch: expected {a}, got {b}")
-    return CompareResult(True, "rows match" + (" (ordered)" if opts.order_matters else ""))
+    return CompareResult(True, "rows match")

@@ -1,8 +1,9 @@
 """Run the benchmark across context levels.
 
-    python -m evaluation.run                                  # E0..E6, retrieved context, LLM from .env
-    python -m evaluation.run --conditions E3,E4,E4-gold     # "-gold" = gold knowledge items
-    python -m evaluation.run --llm gold-sql                       # self-test: mock LLM returns the gold SQL
+    python -m evaluation.run                                # E0..E6, retrieved context, 3 repeats, LLM from .env
+    python -m evaluation.run --conditions E3,E4,E4-gold    # "-gold" = the question's required knowledge items
+    python -m evaluation.run --repeats 1 --questions p10   # quick check
+    python -m evaluation.run --llm gold-sql --repeats 1    # self-test: mock LLM returns the gold SQL
 
 Writes experiments/results/<name>/<run_id>/{manifest.json, records.jsonl, traces.jsonl}.
 Generation (the pipeline) and evaluation (compare/classify) are separate steps inside `evaluate()`.
@@ -20,7 +21,8 @@ from app.database.fingerprint import database_fingerprint
 from app.llm import MockProvider, get_llm
 from app.nl2sql.context import get_level
 from app.nl2sql.pipeline import NL2SQLPipeline, Trace
-from app.retrieval.knowledge import KnowledgeRetriever, load_knowledge_items, semantic_layer_hash
+from app.retrieval.knowledge import (KnowledgeRetriever, load_knowledge_items, semantic_layer_hash,
+                                     stale_knowledge_items)
 from evaluation.benchmark import BENCHMARK_DIR, Question, load_benchmark, load_expected
 from evaluation.compare_results import compare_results
 from evaluation.failures import classify, failed_semantic_checks
@@ -37,16 +39,21 @@ def parse_condition(condition: str) -> tuple[str, str]:
 
 
 def retrieval_scores(question: Question, level: str, trace: Trace) -> dict:
-    """Precision/recall of retrieved items vs the question's required knowledge (types this level allows)."""
+    """Retrieval quality, restricted to the knowledge types this level allows.
+
+    recall    = required items retrieved / required items
+    precision = relevant items retrieved / items retrieved   (relevant = required + related)
+    """
     allowed = set(get_level(level).knowledge_types)
     if not allowed:
-        return {"retrieval_precision": None, "retrieval_recall": None, "required_knowledge_at_level": []}
+        return {"retrieval_precision": None, "retrieval_recall": None, "required_knowledge_at_level": [],
+                "missed_knowledge": []}
     required = {k for k in question.required_knowledge if KNOWLEDGE_TYPES.get(k) in allowed}
+    relevant = required | {k for k in question.related_knowledge if KNOWLEDGE_TYPES.get(k) in allowed}
     retrieved = {i.id for i in trace.retrieved}
-    hit = required & retrieved
     return {
-        "retrieval_precision": round(len(hit) / len(retrieved), 3) if retrieved else None,
-        "retrieval_recall": round(len(hit) / len(required), 3) if required else None,
+        "retrieval_precision": round(len(relevant & retrieved) / len(retrieved), 3) if retrieved else None,
+        "retrieval_recall": round(len(required & retrieved) / len(required), 3) if required else None,
         "required_knowledge_at_level": sorted(required),
         "missed_knowledge": sorted(required - retrieved),
     }
@@ -93,6 +100,8 @@ def main() -> None:
     parser.add_argument("--questions", default=None, help="comma-separated ids to run (default all)")
     parser.add_argument("--name", default="ladder", help="experiment name (results subdirectory)")
     parser.add_argument("--llm", choices=["env", "gold-sql", "mock"], default="env")
+    parser.add_argument("--repeats", type=int, default=3,
+                        help="runs per question x condition (the model may not support temperature 0)")
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
 
@@ -115,6 +124,9 @@ def main() -> None:
     pipeline = NL2SQLPipeline(llm, KnowledgeRetriever())
 
     fingerprint = database_fingerprint()
+    if stale := stale_knowledge_items(pipeline.retriever.embedder.model):
+        raise SystemExit(f"Knowledge store is out of date with semantic/*.yaml ({', '.join(stale)}); "
+                         "run `python scripts/index_knowledge.py`")
     for q in questions:
         if load_expected(q.id)["db_fingerprint"] != fingerprint["hash"]:
             raise SystemExit(f"{q.id}: ground truth was computed on different data; rerun evaluation.ground_truth")
@@ -127,22 +139,24 @@ def main() -> None:
         "run_id": run_id, "timestamp": started.isoformat(timespec="seconds"), "experiment": args.name,
         "conditions": [f"{lv}-{m}" if m != "retrieved" else lv for lv, m in conditions],
         "model": llm.model, "llm_provider": args.llm if args.llm != "env" else settings.llm_provider,
-        "temperature": settings.llm_temperature, "max_tokens": settings.llm_max_tokens,
+        "temperature": settings.llm_temperature, "max_tokens": settings.llm_max_tokens,  # requested values
         "prompt_version": pipeline.prompt.version, "prompt_hash": pipeline.prompt.hash,
         "embedding_provider": settings.embedding_provider, "embedding_model": settings.embedding_model,
         "top_k_per_type": top_k, "semantic_layer_hash": semantic_layer_hash(),
         "benchmark": bench.path, "benchmark_version": bench.version, "benchmark_hash": bench.hash,
-        "question_ids": [q.id for q in questions], "database": fingerprint, "git_commit": git_commit(),
+        "question_ids": [q.id for q in questions], "repeats": args.repeats,
+        "database": fingerprint, "git_commit": git_commit(),
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
-    jobs = [(q, level, mode) for level, mode in conditions for q in questions]
+    jobs = [(q, level, mode, r) for level, mode in conditions for q in questions for r in range(args.repeats)]
 
     def work(job):
-        q, level, mode = job
+        q, level, mode, repeat = job
         trace = pipeline.run(q.question, level, mode, top_k, gold_ids=q.required_knowledge)
         record = evaluate(q, trace)
         record["condition"] = level if mode == "retrieved" else f"{level}-{mode}"
+        record["repeat"] = repeat
         record["run_id"] = run_id
         return trace, record
 
@@ -153,8 +167,11 @@ def main() -> None:
             rec_f.write(json.dumps(record) + "\n")
             tr_f.write(trace.model_dump_json() + "\n")
             mark = "ok " if record["correct"] else ("~  " if record["correct_plausible"] else "X  ")
-            print(f"[{i:>3}/{len(jobs)}] {record['condition']:10s} {record['question_id']} {mark}"
+            print(f"[{i:>4}/{len(jobs)}] {record['condition']:10s} {record['question_id']} r{record['repeat']} {mark}"
                   f"{record['failure_category'] or ''}")
+    # Some models reject temperature; the provider then drops it. Record what was actually sent.
+    manifest["effective_temperature"] = getattr(llm, "temperature", settings.llm_temperature)
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     print(f"Done in {time.perf_counter() - start:.0f}s -> {out_dir}")
     print(f"Next: python -m evaluation.compare --run {out_dir.relative_to(PROJECT_ROOT)}")
 

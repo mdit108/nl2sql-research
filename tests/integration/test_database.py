@@ -36,3 +36,11 @@ def test_execute_sql_reports_errors_as_data():
     assert not result.success and result.error_type == "UndefinedColumn"
     ok = execute_sql("SELECT order_status, count(*) FROM orders GROUP BY 1")
     assert ok.success and ok.row_count == 8
+
+
+def test_knowledge_store_matches_semantic_yaml():
+    """The runner refuses to start otherwise; run scripts/index_knowledge.py after editing semantic/*.yaml."""
+    from app.config import get_settings
+    from app.retrieval.knowledge import stale_knowledge_items
+
+    assert stale_knowledge_items(get_settings().embedding_model) == []

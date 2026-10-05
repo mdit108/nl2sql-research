@@ -9,8 +9,9 @@ BENCH = load_benchmark()
 
 
 def test_benchmark_is_well_formed():
-    assert len(BENCH.questions) == 20
+    assert len(BENCH.questions) == 26
     for q in BENCH.questions:
+        assert not set(q.required_knowledge) & set(q.related_knowledge), q.id
         assert q.required_tables
         if q.category == "ambiguous":
             assert q.alternatives, f"{q.id}: ambiguous questions need alternative interpretations"

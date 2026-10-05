@@ -1,14 +1,17 @@
 # E5 — metric semantics: the business definition AND the exact SQL rule.
-# "Eligible orders" = orders whose order_status is NOT 'canceled' or 'unavailable'.
-version: 1
+#
+# Authoring rule: every item must be self-contained. A metric is retrieved on its own, so it must not
+# rely on a term defined in another item (e.g. "eligible orders", "revenue"). Spell the rule out.
+# tests/unit/test_metric_definitions.py enforces this for the order-status filter.
+version: 2
 knowledge_type: metric
 items:
   - id: met.revenue
     name: Revenue
     content: >
-      Revenue is the value of products sold: SUM(order_items.price) over eligible orders
-      (orders.order_status NOT IN ('canceled', 'unavailable')). It excludes freight and is not
-      based on payments. Attribute revenue to time by orders.order_purchase_timestamp.
+      Revenue is the value of products sold: SUM(order_items.price), excluding orders with
+      orders.order_status IN ('canceled', 'unavailable'). It excludes freight and is not based on
+      payments. Attribute revenue to time by orders.order_purchase_timestamp.
     metadata:
       sql_definition: "SUM(order_items.price) FILTER (WHERE orders.order_status NOT IN ('canceled','unavailable'))"
       tables: [order_items, orders]
@@ -38,54 +41,59 @@ items:
   - id: met.average_order_value
     name: Average order value (AOV)
     content: >
-      Average order value = revenue / number of eligible orders that have at least one item.
-      Compute each order's SUM(order_items.price) first, then average across orders:
+      Average order value = the average per-order product value. Compute each order's
+      SUM(order_items.price), then average across orders:
       AVG(order_total) FROM (SELECT order_id, SUM(price) AS order_total ... GROUP BY order_id).
+      Exclude orders with orders.order_status IN ('canceled', 'unavailable'). Exclude freight.
       Do not average item prices.
     metadata:
-      sql_definition: "AVG(order_total) over per-order SUM(order_items.price), eligible orders"
+      sql_definition: "AVG(order_total) over per-order SUM(order_items.price), status NOT IN ('canceled','unavailable')"
       tables: [order_items, orders]
       columns: [order_items.price, orders.order_status]
 
   - id: met.customer_spend
     name: Customer spend (lifetime value)
     content: >
-      Customer spend is revenue per person: SUM(order_items.price) over eligible orders, grouped
-      by customers.customer_unique_id (orders -> customers via customer_id). The "average
-      customer" spend is the average of these per-person totals.
+      Customer spend is the product value bought per person: SUM(order_items.price) grouped by
+      customers.customer_unique_id (orders -> customers via customer_id), excluding orders with
+      orders.order_status IN ('canceled', 'unavailable'). The "average customer" spend is the
+      average of these per-person totals.
     metadata:
-      sql_definition: "SUM(order_items.price) GROUP BY customers.customer_unique_id (eligible orders)"
+      sql_definition: "SUM(order_items.price) GROUP BY customers.customer_unique_id, status NOT IN ('canceled','unavailable')"
       tables: [order_items, orders, customers]
       columns: [order_items.price, customers.customer_unique_id]
 
   - id: met.best_customers
     name: Best / top / most valuable customers
     content: >
-      "Best customers" means the top 10 customers (customer_unique_id) ranked by customer spend,
-      highest first. Report customer_unique_id and their spend.
+      "Best customers" means the top 10 customers by spend: SUM(order_items.price) grouped by
+      customers.customer_unique_id, excluding orders with orders.order_status IN ('canceled',
+      'unavailable'), highest first. Report customer_unique_id and their spend.
     metadata:
-      sql_definition: "ORDER BY customer spend DESC LIMIT 10"
+      sql_definition: "SUM(order_items.price) GROUP BY customer_unique_id ORDER BY 2 DESC LIMIT 10, status NOT IN ('canceled','unavailable')"
       tables: [order_items, orders, customers]
       columns: [customers.customer_unique_id, order_items.price]
 
   - id: met.repeat_customer_rate
     name: Repeat customer rate
     content: >
-      Repeat customer rate = customers (customer_unique_id) with 2 or more distinct eligible
-      orders / customers with at least 1 eligible order. Expressed as a percentage.
+      Repeat customer rate = customers (customer_unique_id) with 2 or more distinct orders /
+      customers with at least 1 order, counting only orders whose orders.order_status is NOT IN
+      ('canceled', 'unavailable'). Expressed as a percentage.
     metadata:
-      sql_definition: "COUNT(*) FILTER (WHERE n_orders >= 2)::numeric / COUNT(*) over per-customer_unique_id order counts"
+      sql_definition: "COUNT(*) FILTER (WHERE n_orders >= 2)::numeric / COUNT(*) over per-customer_unique_id order counts, status NOT IN ('canceled','unavailable')"
       tables: [customers, orders]
       columns: [customers.customer_unique_id, orders.order_id, orders.order_status]
 
   - id: met.new_customers
     name: New customers (customer acquisition / adoption)
     content: >
-      A new customer is counted in the month of their first eligible order: MIN(order_purchase_timestamp)
+      A new customer is counted in the month of their first order: MIN(order_purchase_timestamp)
       per customers.customer_unique_id, then count customers per date_trunc('month', first_order).
-      "Customer adoption" and "customer acquisition" mean new customers per month.
+      Only orders whose orders.order_status is NOT IN ('canceled', 'unavailable') count as a first
+      order. "Customer adoption" and "customer acquisition" mean new customers per month.
     metadata:
-      sql_definition: "COUNT(*) GROUP BY date_trunc('month', MIN(order_purchase_timestamp) per customer_unique_id)"
+      sql_definition: "COUNT(*) GROUP BY date_trunc('month', MIN(order_purchase_timestamp) per customer_unique_id), status NOT IN ('canceled','unavailable')"
       tables: [customers, orders]
       columns: [customers.customer_unique_id, orders.order_purchase_timestamp]
 
@@ -115,11 +123,11 @@ items:
   - id: met.seller_performance
     name: Seller performance (sellers doing well / top sellers)
     content: >
-      Seller performance is measured by revenue (SUM(order_items.price) over eligible orders, grouped by
-      order_items.seller_id). "Sellers doing well" or "top sellers" means the top 10 sellers by
-      revenue, highest first.
+      Seller performance is measured by seller revenue: SUM(order_items.price) grouped by
+      order_items.seller_id, excluding orders with orders.order_status IN ('canceled', 'unavailable').
+      "Sellers doing well" or "top sellers" means the top 10 sellers by that revenue, highest first.
     metadata:
-      sql_definition: "SUM(order_items.price) GROUP BY seller_id ORDER BY 2 DESC LIMIT 10 (eligible orders)"
+      sql_definition: "SUM(order_items.price) GROUP BY seller_id ORDER BY 2 DESC LIMIT 10, status NOT IN ('canceled','unavailable')"
       tables: [order_items, orders, sellers]
       columns: [order_items.seller_id, order_items.price]
 

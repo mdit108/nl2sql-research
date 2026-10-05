@@ -47,6 +47,7 @@ class Question(BaseModel):
     expected_sql: str
     required_tables: list[str]
     required_knowledge: list[str] = Field(default_factory=list)
+    related_knowledge: list[str] = Field(default_factory=list)
     comparison: Comparison = Field(default_factory=Comparison)
     alternatives: list[Alternative] = Field(default_factory=list)
     semantic_checks: list[SemanticCheck] = Field(default_factory=list)

@@ -12,7 +12,7 @@ items:
       tables: [customers]
       columns: [customers.customer_id, customers.customer_unique_id]
 
-  - id: rule.eligible_orders
+  - id: rule.canceled_orders
     name: Canceled and unavailable orders
     content: >
       Sales metrics (revenue, spend, AOV, seller revenue, repeat customers) exclude orders with

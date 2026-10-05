@@ -29,10 +29,10 @@ test:
 	$(PY) -m pytest -q
 
 selftest:           ## gold SQL through the whole pipeline must score 100%
-	$(PY) -m evaluation.run --llm gold-sql --name selftest
+	$(PY) -m evaluation.run --llm gold-sql --name selftest --repeats 1
 
-pilot:              ## E0-E6 retrieved + E4-E6 gold on the 20-question pilot
-	$(PY) -m evaluation.run --conditions E0,E1,E2,E3,E4,E5,E6,E4-gold,E5-gold,E6-gold
+pilot:              ## E0-E6 retrieved + E4-E6 gold, 3 repeats, then the report
+	$(PY) -m evaluation.run --conditions E0,E1,E2,E3,E4,E5,E6,E4-gold,E5-gold,E6-gold --repeats 3
 	$(PY) -m evaluation.compare
 
 compare:

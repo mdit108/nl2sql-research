@@ -30,6 +30,26 @@ def test_ordered_rows():
     assert not compare_results(exp, [["b", 2], ["a", 3]], C(order_matters=True)).correct
 
 
+def test_ordered_rows_tied_within_tolerance_may_swap():
+    # Real pilot case: rounding to 2 decimals made 4.2447 and 4.2381 both 4.24 and swapped them.
+    exp = [["books", 4.4626], ["stationery", 4.2447], ["pet_shop", 4.2381], ["perfumery", 4.2033]]
+    gen = [["books", 4.46], ["pet_shop", 4.24], ["stationery", 4.24], ["perfumery", 4.20]]
+    assert compare_results(exp, gen, C(order_matters=True, abs_tol=0.01)).correct
+    # Not tied at a tighter tolerance -> order matters again.
+    assert not compare_results(exp, gen, C(order_matters=True, abs_tol=0.0001)).correct
+
+
+def test_ordered_rows_swap_outside_tie_block_fails():
+    exp = [["a", 10.0], ["b", 9.99], ["c", 5.0]]
+    assert compare_results(exp, [["b", 9.99], ["a", 10.0], ["c", 5.0]], C(order_matters=True, abs_tol=0.05)).correct
+    assert not compare_results(exp, [["c", 5.0], ["a", 10.0], ["b", 9.99]], C(order_matters=True, abs_tol=0.05)).correct
+
+
+def test_ordered_rows_without_numeric_columns_are_strict():
+    exp = [["s1"], ["s2"]]
+    assert not compare_results(exp, [["s2"], ["s1"]], C(order_matters=True)).correct
+
+
 def test_column_order_and_extra_columns_are_ignored():
     exp = [["SP", 10], ["RJ", 5]]
     assert compare_results(exp, [[10, "SP", "x"], [5, "RJ", "y"]], C()).correct
